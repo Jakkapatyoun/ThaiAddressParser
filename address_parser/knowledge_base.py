@@ -124,7 +124,20 @@ class KnowledgeBase:
             # ─── Thai (ยาว → สั้น เพื่อป้องกัน substring match ผิด) ───
             ("บ้านเลขที่",      "house_number", "th"),
             ("เลขที่",          "house_number", "th"),
+            # village / building — PREFIX keywords (ระบบจะ prepend ชื่อ keyword ไว้ด้วย)
+            ("คอนโดมิเนียม",    "village",      "th"),
             ("หมู่บ้าน",        "village",      "th"),
+            ("โครงการ",         "village",      "th"),
+            ("คอนโด",           "village",      "th"),
+            ("อาคาร",           "village",      "th"),
+            ("ชุมชน",           "village",      "th"),
+            ("ตึก",             "village",      "th"),
+            # room
+            ("ห้องเลขที่",      "room",         "th"),
+            ("เลขที่ห้อง",      "room",         "th"),
+            ("ห้องที่",         "room",         "th"),
+            ("ห้อง",            "room",         "th"),
+            # moo / soi / road
             ("หมู่ที่",         "moo",          "th"),
             ("หมู่",            "moo",          "th"),
             ("ม.",              "moo",          "th"),
@@ -132,6 +145,7 @@ class KnowledgeBase:
             ("ซ.",              "soi",          "th"),
             ("ถนน",             "road",         "th"),
             ("ถ.",              "road",         "th"),
+            # sub_district / district / province
             ("ตำบล",            "sub_district", "th"),
             ("ต.",              "sub_district", "th"),
             ("แขวง",            "sub_district", "th"),
@@ -147,7 +161,14 @@ class KnowledgeBase:
             ("ประเทศ",          "country",      "th"),
             # ─── English ───
             ("No.",             "house_number", "en"),
+            ("Condominium",     "village",      "en"),
+            ("Condo",           "village",      "en"),
+            ("Building",        "village",      "en"),
+            ("Tower",           "village",      "en"),
             ("Village",         "village",      "en"),
+            ("Project",         "village",      "en"),
+            ("Room No.",        "room",         "en"),
+            ("Room",            "room",         "en"),
             ("Moo",             "moo",          "en"),
             ("Soi",             "soi",          "en"),
             ("Lane",            "soi",          "en"),

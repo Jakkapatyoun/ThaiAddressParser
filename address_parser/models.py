@@ -11,7 +11,8 @@ class ParsedAddress:
 
     raw: str = ""                         # ที่อยู่ต้นฉบับ
     house_number: Optional[str] = None    # บ้านเลขที่
-    village: Optional[str] = None         # ชื่อหมู่บ้าน/โครงการ
+    village: Optional[str] = None         # หมู่บ้าน / โครงการ / อาคาร / ตึก (รวม prefix)
+    room: Optional[str] = None            # ห้องเลขที่
     moo: Optional[str] = None             # หมู่ที่
     soi: Optional[str] = None             # ซอย
     road: Optional[str] = None            # ถนน
@@ -25,7 +26,8 @@ class ParsedAddress:
     # ชื่อคอลัมภ์ภาษาไทย สำหรับแสดงผล / export
     THAI_COLUMNS: ClassVar[Dict[str, str]] = {
         "house_number": "บ้านเลขที่",
-        "village":      "หมู่บ้าน/โครงการ",
+        "village":      "หมู่บ้าน/โครงการ/อาคาร",
+        "room":         "ห้องเลขที่",
         "moo":          "หมู่ที่",
         "soi":          "ซอย",
         "road":         "ถนน",

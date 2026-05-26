@@ -50,17 +50,18 @@ from openpyxl.utils import get_column_letter
 # ─────────────────────────────────────────────────────────────────────────────
 
 PARSED_COLS = [
-    ("บ้านเลขที่",     "house_number"),
-    ("หมู่บ้าน/โครงการ","village"),
-    ("หมู่ที่",        "moo"),
-    ("ซอย",           "soi"),
-    ("ถนน",           "road"),
-    ("ตำบล/แขวง",     "sub_district"),
-    ("อำเภอ/เขต",     "district"),
-    ("จังหวัด",        "province"),
-    ("รหัสไปรษณีย์",   "postal_code"),
-    ("ประเทศ",         "country"),
-    ("ความมั่นใจ (%)", "__confidence"),
+    ("บ้านเลขที่",           "house_number"),
+    ("หมู่บ้าน/โครงการ/อาคาร","village"),
+    ("ห้องเลขที่",            "room"),
+    ("หมู่ที่",               "moo"),
+    ("ซอย",                  "soi"),
+    ("ถนน",                  "road"),
+    ("ตำบล/แขวง",            "sub_district"),
+    ("อำเภอ/เขต",            "district"),
+    ("จังหวัด",               "province"),
+    ("รหัสไปรษณีย์",          "postal_code"),
+    ("ประเทศ",                "country"),
+    ("ความมั่นใจ (%)",        "__confidence"),
 ]
 
 HEADER_FILL   = PatternFill("solid", fgColor="2C6E8A")

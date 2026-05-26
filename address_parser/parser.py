@@ -41,10 +41,24 @@ class AddressParser:
         "Thailand":      "Thailand",
     }
 
-    # Pattern สำหรับตรวจจับชื่อหมู่บ้าน/โครงการหลังบ้านเลขที่
+    # Keywords ที่ต้อง prepend กลับไปด้านหน้าค่า เพื่อให้ได้ชื่อเต็ม
+    # เช่น keyword="หมู่บ้าน" + value="ลดาวัลย์" → "หมู่บ้านลดาวัลย์"
+    # เช่น keyword="อาคาร"    + value="สยามทาวเวอร์" → "อาคารสยามทาวเวอร์"
+    PREFIX_KEYWORDS: frozenset = frozenset({
+        # Thai
+        "คอนโดมิเนียม", "หมู่บ้าน", "โครงการ", "คอนโด",
+        "อาคาร", "ชุมชน", "ตึก",
+        # English (ใช้ space นำหน้า)
+        "Condominium", "Building", "Tower", "Village", "Project", "Condo",
+    })
+
+    # Pattern ตรวจจับ village/building ที่อยู่หลังบ้านเลขที่โดยตรง
+    # (กรณีที่ keyword ไม่ได้ถูก pick up โดย keyword system)
     # เช่น "456 บ้านพฤกษา" → house="456", village="บ้านพฤกษา"
     VILLAGE_AFTER_HOUSE_RE = re.compile(
-        r"^(\d[\d/\-–]*)[\s]+((?:บ้าน|หมู่บ้าน|โครงการ|คอนโด|อาคาร|ตึก)\S{1,25})"
+        r"^(\d[\d/\-–]*)[\s]+"
+        r"((?:คอนโดมิเนียม|หมู่บ้าน|โครงการ|คอนโด|อาคาร|ตึก|บ้าน|ชุมชน)"
+        r"\S{0,30}(?:\s+\S{1,20})?)"   # รองรับชื่อที่มี space 1 คำ เช่น "The City"
     )
 
     def __init__(self, kb: KnowledgeBase, cache_threshold: float = 0.88):
@@ -217,6 +231,8 @@ class AddressParser:
         """
         สกัดค่าระหว่าง keyword แต่ละคู่
         - ค่าของ keyword[i] = text[end_of_kw_i : start_of_kw_{i+1}]
+        - PREFIX_KEYWORDS (village/building type): prepend keyword กลับไป
+          เช่น keyword="หมู่บ้าน" + value="ลดาวัลย์" → "หมู่บ้านลดาวัลย์"
         - ข้อความก่อน keyword แรก → house_number (ถ้ายังไม่มี)
         """
         components: Dict[str, str] = {}
@@ -226,18 +242,31 @@ class AddressParser:
             val_end   = matches[i + 1][0] if i + 1 < len(matches) else len(text)
             value     = text[val_start:val_end].strip(self.TRIM_CHARS)
 
-            if value and component not in components:
-                components[component] = value
+            if component not in components:
+                # ── PREFIX keyword: prepend keyword กลับเป็นชื่อเต็ม ──
+                if keyword in self.PREFIX_KEYWORDS and component == "village":
+                    # กำหนด separator ระหว่าง keyword กับ value:
+                    #   English keyword            → space เสมอ: "Building Athenee"
+                    #   Thai keyword + Thai value  → ไม่มี space: "หมู่บ้านลดาวัลย์"
+                    #   Thai keyword + Eng value   → space: "โครงการ The City"
+                    if keyword.isascii():
+                        sep = " "
+                    elif value and value[0].isascii():
+                        sep = " "   # Thai kw + English name
+                    else:
+                        sep = ""    # Thai kw + Thai name (compound word)
+                    full = keyword + sep + value if value else keyword
+                    components[component] = full
+                elif value:
+                    components[component] = value
 
         # ข้อความหน้า keyword แรก → บ้านเลขที่ (ถ้ายังไม่มี)
         if matches and "house_number" not in components:
             prefix = text[: matches[0][0]].strip(self.TRIM_CHARS)
-            # ตัด prefix เช่น "บ้านเลขที่", "เลขที่" ออก
             prefix = re.sub(r"^(บ้านเลขที่|เลขที่)\s*", "", prefix).strip()
             if prefix:
                 components["house_number"] = prefix
         elif not matches:
-            # ไม่เจอ keyword เลย — ลองดึง house number จาก regex
             m = self.HOUSE_RE.match(text)
             if m:
                 components["house_number"] = m.group(1)
