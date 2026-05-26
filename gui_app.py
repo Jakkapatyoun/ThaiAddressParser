@@ -111,12 +111,20 @@ def process_excel(
     addr_col: str,
     output_path: str,
     parser: AddressParser,
-    progress_cb=None,    # callback(current, total, addr_result)
-    log_cb=None,         # callback(message)
+    progress_cb=None,       # callback(current, total)
+    log_cb=None,            # callback(message)
+    auto_learn: bool = True,         # บันทึก ≥75% confidence ลง KB อัตโนมัติ
+    review_threshold: float = 0.75,  # < threshold → ส่งไป Review sheet
 ) -> dict:
     """
     อ่าน Excel → parse ทุกแถว → เขียน Excel ใหม่
-    Returns: {"total": n, "ok": n, "elapsed": secs, "output": path}
+
+    การเรียนรู้อัตโนมัติ (auto_learn=True):
+      • confidence = 100%  → save as verified=True  (จำแน่นอน ใช้ครั้งต่อไปทันที)
+      • confidence 75–99%  → save as verified=False (เก็บ pattern ไว้)
+      • confidence < 75%   → ไม่บันทึก + ส่งเข้า "ตรวจสอบ" sheet
+
+    Returns dict with keys: total, ok, learned, uncertain, elapsed, output
     """
     if log_cb: log_cb(f"อ่านไฟล์: {os.path.basename(input_path)}")
 
@@ -126,7 +134,7 @@ def process_excel(
     ws_out = wb_out.active
     ws_out.title = sheet_name[:31]
 
-    # ── Header row ──
+    # ── หาคอลัมภ์ที่อยู่ ──
     headers_in = [c.value for c in next(ws_in.iter_rows(max_row=1))]
     col_idx    = None
     for i, h in enumerate(headers_in):
@@ -137,36 +145,53 @@ def process_excel(
         wb_in.close()
         raise ValueError(f"ไม่พบคอลัมภ์ '{addr_col}' ใน sheet '{sheet_name}'")
 
-    # เขียน header
-    out_headers = [str(h) if h else "" for h in headers_in]
-    parsed_header_names = [t for t, _ in PARSED_COLS]
-    all_headers = out_headers + parsed_header_names
+    # ── Main sheet header ──
+    out_headers       = [str(h) if h else "" for h in headers_in]
+    parsed_hdr_names  = [t for t, _ in PARSED_COLS]
+    all_headers       = out_headers + parsed_hdr_names
     ws_out.row_dimensions[1].height = 30
-
     for ci, h in enumerate(all_headers, 1):
-        cell = ws_out.cell(row=1, column=ci, value=h)
-        is_new = ci > len(out_headers)
-        style_header(cell, is_new=is_new)
+        style_header(ws_out.cell(row=1, column=ci, value=h),
+                     is_new=(ci > len(out_headers)))
 
-    # ── Data rows ──
-    all_rows = list(ws_in.iter_rows(min_row=2, values_only=True))
-    total   = len(all_rows)
-    ok_cnt  = 0
-    t_start = datetime.now()
+    # ── Process rows ──
+    all_rows  = list(ws_in.iter_rows(min_row=2, values_only=True))
+    total     = len(all_rows)
+    ok_cnt    = 0
+    learned   = 0      # จำนวนที่บันทึกลง KB
+    uncertain_rows = []  # (original_row_tuple, ParsedAddress)
+    t_start   = datetime.now()
 
     if log_cb: log_cb(f"พบ {total:,} แถว — เริ่มแยกที่อยู่...")
 
     for ri, row in enumerate(all_rows, 2):
         raw  = str(row[col_idx]).strip() if row[col_idx] else ""
         addr = parser.parse(raw, remember=False) if raw else ParsedAddress(raw="")
+
         if addr.province or addr.sub_district:
             ok_cnt += 1
 
-        # เขียน original columns
+        # ── Auto-learn: บันทึกลง KB ตาม confidence ──
+        if auto_learn and raw:
+            conf = addr.confidence
+            if conf >= review_threshold:
+                # 100% → verified (ใช้ exact-match cache ครั้งต่อไป)
+                # 75-99% → unverified (เก็บ pattern)
+                is_verified = (conf == 1.0)
+                parser.kb.save_example(
+                    raw, addr.to_dict(),
+                    verified=is_verified,
+                    source="excel_auto",
+                )
+                learned += 1
+            else:
+                # ไม่มั่นใจ → เก็บสำหรับ review
+                uncertain_rows.append((row, addr))
+
+        # ── เขียน main sheet ──
         for ci, val in enumerate(row, 1):
             ws_out.cell(row=ri, column=ci, value=val).border = BORDER_THIN
 
-        # เขียน parsed columns
         base = len(out_headers)
         for oi, (_, field) in enumerate(PARSED_COLS):
             ci   = base + oi + 1
@@ -174,56 +199,212 @@ def process_excel(
             if field == "__confidence":
                 pct = round(addr.confidence * 100)
                 cell.value = pct
-                # สีตาม confidence
-                if pct >= 75:
-                    cell.fill = PatternFill("solid", fgColor="D5F5E3")
-                elif pct >= 40:
-                    cell.fill = PatternFill("solid", fgColor="FCF3CF")
-                else:
-                    cell.fill = PatternFill("solid", fgColor="FADBD8")
+                cell.fill  = PatternFill("solid", fgColor=(
+                    "D5F5E3" if pct >= 75 else
+                    "FCF3CF" if pct >= 40 else "FADBD8"
+                ))
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             else:
-                val_field = getattr(addr, field, None) or ""
-                cell.value = val_field
+                cell.value = getattr(addr, field, None) or ""
                 cell.fill  = NEW_COL_FILL
             cell.border = BORDER_THIN
 
-        # Progress callback ทุก 50 แถว
         if progress_cb and (ri % 50 == 0 or ri - 1 == total):
             progress_cb(ri - 1, total)
 
-    # ── Column widths ──
+    # ── Column widths (main sheet) ──
     for ci in range(1, len(all_headers) + 1):
-        is_new = ci > len(out_headers)
-        col_letter = get_column_letter(ci)
-        if is_new:
-            ws_out.column_dimensions[col_letter].width = 18
-        else:
-            ws_out.column_dimensions[col_letter].width = 22
+        ws_out.column_dimensions[get_column_letter(ci)].width = (
+            18 if ci > len(out_headers) else 22
+        )
     ws_out.freeze_panes = "A2"
 
+    # ── Review sheet (แถวที่ไม่มั่นใจ) ──
+    REVIEW_SHEET = "ตรวจสอบ"
+    review_editable = [t for t, _ in PARSED_COLS if t != "ความมั่นใจ (%)"]
+    review_col_names = [t + " [แก้ไข]" for t in review_editable]
+
+    if uncertain_rows:
+        ws_rv = wb_out.create_sheet(REVIEW_SHEET)
+        # Header: คอลัมภ์เดิม + คอลัมภ์ที่ parser แยกได้ + คอลัมภ์แก้ไข
+        rv_headers = (out_headers
+                      + [t for t, _ in PARSED_COLS]
+                      + review_col_names)
+        ws_rv.row_dimensions[1].height = 30
+        for ci, h in enumerate(rv_headers, 1):
+            is_edit = ci > len(out_headers) + len(PARSED_COLS)
+            cell = ws_rv.cell(row=1, column=ci, value=h)
+            cell.fill = PatternFill("solid", fgColor=(
+                "C0392B" if is_edit else
+                "1A5276" if ci > len(out_headers) else "2C6E8A"
+            ))
+            cell.font   = HEADER_FONT
+            cell.border = BORDER_THIN
+            cell.alignment = Alignment(horizontal="center", vertical="center",
+                                       wrap_text=True)
+
+        EDIT_FILL = PatternFill("solid", fgColor="FDFEFE")
+        EDIT_BORDER = Border(
+            left=Side(style="medium", color="C0392B"),
+            right=Side(style="medium", color="C0392B"),
+            top=Side(style="thin", color="C0392B"),
+            bottom=Side(style="thin", color="C0392B"),
+        )
+        for ri2, (orig_row, addr) in enumerate(uncertain_rows, 2):
+            # original data
+            for ci, val in enumerate(orig_row, 1):
+                ws_rv.cell(row=ri2, column=ci, value=val).border = BORDER_THIN
+            # parser result
+            base2 = len(out_headers)
+            for oi, (_, field) in enumerate(PARSED_COLS):
+                ci = base2 + oi + 1
+                cell = ws_rv.cell(row=ri2, column=ci)
+                if field == "__confidence":
+                    cell.value = round(addr.confidence * 100)
+                    cell.fill  = PatternFill("solid", fgColor="FADBD8")
+                    cell.alignment = Alignment(horizontal="center",
+                                               vertical="center")
+                else:
+                    cell.value = getattr(addr, field, None) or ""
+                    cell.fill  = NEW_COL_FILL
+                cell.border = BORDER_THIN
+            # editable correction columns (ว่าง ให้ user กรอก)
+            edit_base = base2 + len(PARSED_COLS)
+            for oi in range(len(review_editable)):
+                cell = ws_rv.cell(row=ri2, column=edit_base + oi + 1, value="")
+                cell.fill   = EDIT_FILL
+                cell.border = EDIT_BORDER
+
+        # column widths
+        for ci in range(1, len(rv_headers) + 1):
+            ws_rv.column_dimensions[get_column_letter(ci)].width = (
+                20 if ci > len(out_headers) else 22
+            )
+        ws_rv.freeze_panes = "A2"
+
+        # คำแนะนำ
+        ws_rv.cell(row=1, column=len(rv_headers) + 2,
+                   value="💡 กรอกค่าที่ถูกต้องในคอลัมภ์สีแดง แล้วกลับมากด 'เรียนรู้จากการตรวจสอบ'")
+
     # ── Summary sheet ──
-    ws_sum = wb_out.create_sheet("สรุปผล")
     elapsed = (datetime.now() - t_start).total_seconds()
     pct_ok  = ok_cnt / total * 100 if total else 0
-    summary = [
-        ("ไฟล์ input",       os.path.basename(input_path)),
-        ("Sheet",            sheet_name),
-        ("คอลัมภ์ที่อยู่",    addr_col),
-        ("วันที่ประมวลผล",    datetime.now().strftime("%Y-%m-%d %H:%M")),
-        ("จำนวนแถวทั้งหมด",  total),
-        ("แยกสำเร็จ",        f"{ok_cnt:,} ({pct_ok:.1f}%)"),
-        ("เวลาที่ใช้",        f"{elapsed:.1f} วินาที ({total/elapsed if elapsed else 0:.0f} rows/s)"),
-    ]
-    for row_data in summary:
+    ws_sum  = wb_out.create_sheet("สรุปผล")
+    for row_data in [
+        ("ไฟล์ input",          os.path.basename(input_path)),
+        ("Sheet",               sheet_name),
+        ("คอลัมภ์ที่อยู่",       addr_col),
+        ("วันที่ประมวลผล",       datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("จำนวนแถวทั้งหมด",     total),
+        ("แยกสำเร็จ",           f"{ok_cnt:,} ({pct_ok:.1f}%)"),
+        ("บันทึกลง KB อัตโนมัติ", f"{learned:,} แถว (confidence ≥{review_threshold*100:.0f}%)"),
+        ("รอตรวจสอบ",           f"{len(uncertain_rows):,} แถว (ดูใน sheet '{REVIEW_SHEET}')"),
+        ("เวลาที่ใช้",           f"{elapsed:.1f}s ({total/elapsed if elapsed else 0:.0f} rows/s)"),
+    ]:
         ws_sum.append(row_data)
-    ws_sum.column_dimensions["A"].width = 20
+    ws_sum.column_dimensions["A"].width = 25
     ws_sum.column_dimensions["B"].width = 40
 
     wb_in.close()
     wb_out.save(output_path)
 
-    return {"total": total, "ok": ok_cnt, "elapsed": elapsed, "output": output_path}
+    return {
+        "total":     total,
+        "ok":        ok_cnt,
+        "learned":   learned,
+        "uncertain": len(uncertain_rows),
+        "elapsed":   elapsed,
+        "output":    output_path,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# เรียนรู้จาก Review sheet ที่ user แก้ไขแล้ว
+# ─────────────────────────────────────────────────────────────────────────────
+
+REVIEW_SHEET_NAME = "ตรวจสอบ"
+REVIEW_FIELD_MAP  = {t + " [แก้ไข]": f for t, f in [
+    ("บ้านเลขที่", "house_number"),
+    ("หมู่บ้าน/โครงการ", "village"),
+    ("หมู่ที่", "moo"),
+    ("ซอย", "soi"),
+    ("ถนน", "road"),
+    ("ตำบล/แขวง", "sub_district"),
+    ("อำเภอ/เขต", "district"),
+    ("จังหวัด", "province"),
+    ("รหัสไปรษณีย์", "postal_code"),
+    ("ประเทศ", "country"),
+]}
+
+
+def learn_from_review(
+    review_path: str,
+    addr_col: str,
+    parser: AddressParser,
+    log_cb=None,
+) -> dict:
+    """
+    อ่าน Excel ที่มี 'ตรวจสอบ' sheet — บันทึกแถวที่ user กรอกแก้ไขลง KB
+    เฉพาะแถวที่มีการกรอกค่าแก้ไขอย่างน้อย 1 คอลัมภ์
+
+    Returns: {"imported": n, "skipped": n}
+    """
+    wb = openpyxl.load_workbook(review_path, read_only=True, data_only=True)
+    if REVIEW_SHEET_NAME not in wb.sheetnames:
+        wb.close()
+        raise ValueError(f"ไม่พบ sheet '{REVIEW_SHEET_NAME}' ในไฟล์")
+
+    ws = wb[REVIEW_SHEET_NAME]
+    rows = list(ws.iter_rows(values_only=True))
+    headers = [str(h) if h else "" for h in rows[0]]
+
+    # หาตำแหน่งคอลัมภ์ที่อยู่ต้นฉบับ และคอลัมภ์แก้ไข
+    raw_col_idx  = next((i for i, h in enumerate(headers) if h == addr_col), None)
+    edit_col_map = {
+        field: i
+        for i, h in enumerate(headers)
+        if h in REVIEW_FIELD_MAP
+        for field in [REVIEW_FIELD_MAP[h]]
+    }
+
+    if raw_col_idx is None:
+        wb.close()
+        raise ValueError(f"ไม่พบคอลัมภ์ '{addr_col}' ใน Review sheet")
+
+    imported = 0
+    skipped  = 0
+
+    for row in rows[1:]:
+        raw = str(row[raw_col_idx]).strip() if row[raw_col_idx] else ""
+        if not raw:
+            skipped += 1
+            continue
+
+        # เก็บค่าที่ user กรอกแก้ไข
+        corrections = {
+            field: str(row[ci]).strip()
+            for field, ci in edit_col_map.items()
+            if ci < len(row) and row[ci] not in (None, "", "None")
+        }
+        if not corrections:
+            skipped += 1
+            continue   # user ไม่ได้กรอก → ข้ามไป
+
+        # parse ก่อน แล้ว override ด้วยค่าที่ user แก้ไข
+        auto = parser.parse(raw, remember=False)
+        corrected_data = auto.to_dict()
+        corrected_data.update(corrections)
+
+        corrected = ParsedAddress.from_dict({**corrected_data, "raw": raw})
+        corrected.confidence = 1.0
+
+        parser.kb.save_correction(raw, auto.to_dict(), corrected.to_dict())
+        if log_cb:
+            log_cb(f"✅ เรียนรู้: {raw[:45]}...")
+        imported += 1
+
+    wb.close()
+    return {"imported": imported, "skipped": skipped}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -388,6 +569,11 @@ def build_gui():
                           state="disabled")
     btn_open.pack(side="left", padx=(10, 0))
 
+    btn_learn = ttk.Button(frm_btn, text="🧠  เรียนรู้จากการตรวจสอบ",
+                           style="Accent.TButton", command=lambda: start_learn_from_review(),
+                           state="normal")
+    btn_learn.pack(side="left", padx=(10, 0))
+
     # ── Progress ──
     frm_prog = ttk.Frame(main)
     frm_prog.pack(fill="x", pady=(0, 6))
@@ -466,12 +652,37 @@ def build_gui():
             try:
                 result = process_excel(
                     input_path, sheet, col, output_path,
-                    parser, _prog, _log
+                    parser, _prog, _log,
+                    auto_learn=True, review_threshold=0.75,
                 )
                 q.put(("done", result))
             except Exception as ex:
                 q.put(("error", str(ex)))
 
+        threading.Thread(target=_run, daemon=True).start()
+        root.after(100, _poll_queue)
+
+    # ── Learn from Review ──
+    def start_learn_from_review():
+        path = filedialog.askopenfilename(
+            title="เลือกไฟล์ Excel ที่ตรวจสอบแล้ว",
+            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        col = var_col.get().strip()
+        if not col:
+            messagebox.showwarning("⚠️", "กรุณาระบุชื่อคอลัมภ์ที่อยู่ก่อน")
+            return
+
+        def _run():
+            try:
+                result = learn_from_review(path, col, parser, log_cb=lambda m: q.put(("log", m)))
+                q.put(("learn_done", result))
+            except Exception as ex:
+                q.put(("error", str(ex)))
+
+        log(f"🧠 เรียนรู้จาก: {os.path.basename(path)}")
         threading.Thread(target=_run, daemon=True).start()
         root.after(100, _poll_queue)
 
@@ -490,21 +701,47 @@ def build_gui():
                 result = item[1]
                 pct_ok = result["ok"] / result["total"] * 100 if result["total"] else 0
                 log(f"✅ เสร็จสิ้น {result['total']:,} แถว")
-                log(f"   สำเร็จ: {result['ok']:,} ({pct_ok:.1f}%)"
+                log(f"   สำเร็จ   : {result['ok']:,} ({pct_ok:.1f}%)"
                     f"  |  เวลา: {result['elapsed']:.1f}s")
-                log(f"   Output: {result['output']}")
+                log(f"   บันทึก KB: {result['learned']:,} แถว (auto-learn)")
+                if result["uncertain"] > 0:
+                    log(f"   ⚠️  รอตรวจสอบ: {result['uncertain']:,} แถว"
+                        f" → ดู sheet 'ตรวจสอบ' แล้วกด 'เรียนรู้จากการตรวจสอบ'")
                 progress_val.set(100)
                 var_progress.set(f"เสร็จแล้ว ✅  {result['total']:,} แถว")
                 var_status.set("✅ เสร็จสิ้น")
                 btn_run.configure(state="normal")
                 btn_open.configure(state="normal")
+
+                review_note = (
+                    f"\n⚠️  มี {result['uncertain']:,} แถวที่ไม่มั่นใจ\n"
+                    f"   → ดูใน sheet 'ตรวจสอบ' แก้ไข แล้วกด 'เรียนรู้จากการตรวจสอบ'"
+                    if result["uncertain"] > 0 else ""
+                )
                 messagebox.showinfo(
                     "✅ เสร็จสิ้น",
                     f"แยกที่อยู่เสร็จแล้ว!\n\n"
                     f"รายการทั้งหมด : {result['total']:,} แถว\n"
                     f"สำเร็จ        : {result['ok']:,} ({pct_ok:.1f}%)\n"
-                    f"เวลา          : {result['elapsed']:.1f} วินาที\n\n"
-                    f"ไฟล์: {os.path.basename(result['output'])}"
+                    f"บันทึกลง KB   : {result['learned']:,} แถว\n"
+                    f"เวลา          : {result['elapsed']:.1f} วินาที"
+                    f"{review_note}"
+                )
+            elif kind == "learn_done":
+                result = item[1]
+                log(f"🧠 เรียนรู้เสร็จ: {result['imported']} แถว"
+                    f" | ข้าม {result['skipped']} แถว (ไม่มีการแก้ไข)")
+                stats = kb.get_stats()
+                log(f"   KB ตอนนี้: verified={stats['verified_examples']:,}"
+                    f" | corrections={stats['corrections']:,}")
+                var_status.set(f"🧠 เรียนรู้แล้ว {result['imported']} แถว")
+                messagebox.showinfo(
+                    "🧠 เรียนรู้เสร็จแล้ว",
+                    f"บันทึกลง Knowledge Base แล้ว!\n\n"
+                    f"เรียนรู้    : {result['imported']:,} แถว\n"
+                    f"ข้าม       : {result['skipped']:,} แถว (ไม่มีการแก้ไข)\n\n"
+                    f"KB verified : {stats['verified_examples']:,} รายการ\n"
+                    f"รอบต่อไปจะแม่นขึ้นสำหรับที่อยู่รูปแบบนี้ ✅"
                 )
             elif kind == "error":
                 log(f"❌ Error: {item[1]}")
@@ -513,7 +750,7 @@ def build_gui():
                 messagebox.showerror("❌ ข้อผิดพลาด", item[1])
 
         # Check if still running
-        if var_status.get() == "กำลังประมวลผล...":
+        if var_status.get() in ("กำลังประมวลผล...",):
             root.after(150, _poll_queue)
 
     log("🏠 Thai Address Parser พร้อมใช้งาน")
