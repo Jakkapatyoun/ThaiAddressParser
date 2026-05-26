@@ -1,0 +1,16 @@
+# Thai Address Parser — requirements
+
+# ─── Core (ต้องติดตั้ง) ───────────────────────────────────────
+# Excel read/write สำหรับ GUI app และ CLI mode
+openpyxl>=3.1.0
+
+# สีใน terminal CLI (optional — ถ้าไม่ติดตั้ง ยังใช้งานได้)
+colorama>=0.4.6
+
+# ─── Build exe (ต้องใช้ตอน build เท่านั้น) ──────────────────
+pyinstaller>=6.0.0
+
+# ─── Standard Library (ไม่ต้องติดตั้ง — built-in Python) ────
+# csv, sqlite3, json, re, os, sys, datetime, difflib, hashlib
+# argparse, threading, queue, subprocess, tkinter, tkinter.ttk
+# tkinter.filedialog, tkinter.messagebox
